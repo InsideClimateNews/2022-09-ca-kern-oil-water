@@ -1,0 +1,397 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, results = TRUE, message = FALSE)
+
+options(scipen=999)
+```
+
+# Water injection into California oil and gas wells
+
+Data and [R](https://www.r-project.org/) code to reproduce the analysis underlying [this Sep. 18, 2022 Inside Climate News article](https://insideclimatenews.org/news/18092022/drought-wracked-california-allows-oil-companies-to-use-high-quality-water-but-regulators-error-strewn-records-make-accurate-accounting-nearly-impossible/), examining steam/water reported as being injected into oil and gas wells for fossil fuel extraction in Kern County and the rest of California.
+
+### Data and setting up
+
+The data covers the period 2018-2021 and is derived from public [database downloads](https://filerequest.conservation.ca.gov/?q=production_injection_data) provided by the Geologic Energy Management Division of the California Department of Conservation (CalGEM). Since 2018, this data has been released as SQL Server backup files, each covering a single year. We downloaded the data on June 20, 2022 and then converted individual tables from these files to CSV files and then processed the data into `RData` format using the script `data_processing.R`. 
+
+CalGEM provides data on steam/water injection in quarterly reports and monthly reports for each well, which we joined to data for each well to identify the locations by county and operators. The quarterly reports contain more information on the sources and quality of water and were used for most of the analysis. However, to address concerns about data quality, we also ran some analyses from the monthly reports. In the CalGEM data, water quantities are given in barrels. The calculations below convert to gallons by multiplying these values by 42.
+
+```{r}
+# load required packages
+library(tidyverse)
+library(lubridate)
+library(DT)
+
+# load processed data
+load("calgem.RData")
+
+# data processing to allow analysis comparing Kern County to the rest of the state, whether water was suitable in its untreated state for domestic use or irrigation, and whether any treatment was applied.
+q_inject <- q_inject %>%
+  mutate(county2 = case_when(county == "Kern" ~ "Kern County",
+                             TRUE ~ "Other"),
+         water_treated = paste(water_treated_deoiling,water_treated_disinfection,water_treated_desalinization,water_treated_membrane,water_treated_other),
+         water_suitable_treated = case_when(water_suitable == "Y" ~ "yes",
+                                            water_suitable == "N" & grepl("Y",water_treated) ~ "no_treated",
+                                            TRUE ~ "no_untreated"))
+
+m_inject <- m_inject %>%
+  mutate(county2 = case_when(county == "Kern" ~ "Kern County",
+                             TRUE ~ "Other")) 
+
+```
+
+
+### Use of high-quality water for oil and gas extraction
+
+Most of the water/steam injected into oil and gas wells is wastewater, primarily “produced” water, which comes from wells along with oil and gas when the fuels are extracted. However, some high-quality water, marked as suitable for domestic or irrigation use without treatment, is also injected, which is a concern in drought-prone California. 
+
+This water primarily comes from:
+
+- bodies of surface water including streams, lakes, and the State Water Project, a massive system of dams and aqueducts that ferries rain and snowmelt from the Sierra Nevada mountains to parched Southern California.
+- domestic water supplies.
+
+For this analysis, we removed any water used in offshore operations and injection into wells marked with the `well_type_code` "WD," which designates disposal of water, rather than its use in fossil fuel extraction.
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_suitable == "Y") %>%
+  group_by(county2) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable()
+```
+
+Kern County accounts for about three-quarters of California's oil and gas production. Even so, quarterly injection reports indicate that operators in the county used a disproprotionate quantity of water marked as suitable for domestic or irrigation use without treatment, based on measurements on the quantity of dissolved solids. Kern County accounted for more than 99.5 percent of the use of this high-quality water across California.
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD") %>%
+  group_by(water_suitable_treated, county2) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  pivot_wider(names_from = water_suitable_treated, values_from = gallons_injected) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  rowwise() %>%
+  mutate(
+    total = sum(c(no_treated,no_untreated,yes)),
+    no_treated_pc = round(100 * no_treated/total,2),
+    no_untreated_pc = round(100 * no_untreated/total,2),
+    yes_pc = round(100 * yes/total,2),
+    no_treated = prettyNum(no_treated, big.mark = ","),
+    no_untreated = prettyNum(no_untreated, big.mark = ","),
+    yes = prettyNum(yes, big.mark = ","),
+    total = prettyNum(total, big.mark = ",")
+  ) %>% 
+  select(-total) %>%
+  datatable()
+```
+
+In Kern County, almost 1.3 percent of the water injected into oil and gas wells for oil and gas extraction was marked as being suitable for domestic or irrigation use without treatment, compared to around one hundredth of one percent for the rest of the state. 
+
+### Use of surface water, including the State Water Project
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Surface Water") %>%
+  group_by(water_suitable_treated) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable()
+```
+
+All of the surface water injected into oil and gas wells for fossil fuel extraction was marked as being suitable for domestic use or irrigation without treatment. We then looked at the use of this water by year.
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Surface Water" & water_suitable == "Y") %>%
+  group_by(county2, year) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  pivot_wider(names_from = county2, values_from = gallons_injected) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  datatable()
+```
+
+Kern County accounted for almost all the surface water injected into oil and gas wells in California for fossil fuel extraction. The use of this water declined from 2018 to 2021.
+
+We then looked at the sources of this water used in Kern County, which required some further data cleaning.
+
+```{r}
+kern_surface <- q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Surface Water" & water_suitable_treated == "yes" & county == "Kern") 
+  
+unique(kern_surface$water_source_name)
+```
+
+The California Aqueduct is part of the State Water Project, so these entries could be consolidated.
+
+```{r}
+kern_surface <- kern_surface %>%
+  mutate(water_source_name2 = case_when(grepl("California Aqueduct", water_source_name, ignore.case = TRUE) ~ "State Water Project",
+                                       TRUE ~ water_source_name))
+
+kern_surface %>%
+  group_by(water_source_name2) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+"4" appears to be a data entry error, with the operator entering the numerical code for surface water rather than a named water source. 
+
+The vast majority of the surface water injected into oil and gas wells for fossil fuel extraction in Kern County came from the State Water Project. Which operators used this water?
+
+```{r}
+kern_surface %>%
+  filter(water_source_name2 == "State Water Project") %>%
+  group_by(operator_name) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  arrange(-gallons_injected) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ","))  %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+Berry Petroleum accounted for about two-thirds of the high-quality water from the State Water Project injected into oil and gas wells for fossil fuel extraction in Kern County.
+
+We then looked at the use of water from the State Water Project in Kern County by year.
+
+```{r}
+kern_surface %>%
+  filter(water_source_name2 == "State Water Project") %>%
+  group_by(year) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable
+
+```
+
+The diversion of water marked as coming from the State Water Project for injection into oil and gas wells in Kern County has been falling in recent years, according to CalGEM’s data, from more than 234 million gallons in 2018 to around 58 million gallons in 2021.
+
+### From domestic water suppliers
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Domestic Water System") %>%
+  group_by(water_suitable_treated) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+A quarter of the water listed as being obtained from domestic water suppliers was marked as being suitable for domestic or irrigation use in its untreated state. We then looked at the use of this high-quality water by year.
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Domestic Water System" & water_suitable == "Y") %>%
+  group_by(county2,year) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  pivot_wider(names_from = county2, values_from = gallons_injected) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  datatable()
+```
+
+Again, Kern County accounted for the vast majority of the high-quality water from domestic suppliers. In 2021, as the county entered a severe drought, the use of this water appeared to increase.
+
+We then looked at the suppliers of this water in Kern County, which required some further data cleaning.
+
+```{r}
+kern_domestic_suitable <- q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Domestic Water System" & water_suitable == "Y" & county == "Kern") 
+  
+unique(kern_domestic_suitable$water_source_name)
+```
+
+Three of these entries seem to represent the West Kern Water District, so could be consolidated.
+
+```{r}
+kern_domestic_suitable <- kern_domestic_suitable %>%
+  mutate(water_source_name2 = case_when(grepl("West Kern",water_source_name) ~ "West Kern Water District",
+                                        TRUE ~ water_source_name)) 
+  
+kern_domestic_suitable %>%
+  group_by(water_source_name2) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+"03" appears to be a data entry error, with the operator repeating the code for water from a domestic supplier, rather than entering the name of that supplier.
+
+The vast majority, if not all, of this water came from the West Kern Water District. We then looked at the operators using high-quality water marked as coming from the West Kern Water District.
+
+```{r}
+kern_domestic_suitable %>%
+  filter(water_source_name2 == "West Kern Water District") %>%
+  group_by(water_source_name2, operator_name) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+Sentinel Peak Resources California accounted for around two-thirds of the use of high-quality water supplied by the West Kern Water District. We then looked at its use of this water by year.
+
+```{r}
+kern_domestic_suitable %>%
+  filter(water_source_name2 == "West Kern Water District" & grepl("Sentinel",operator_name)) %>%
+  group_by(year,water_source_name2,operator_name) %>% 
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable()
+```
+
+We next looked at the water from domestic suppliers marked as not suitable for domestic or irrigation use in its untreated state. The vast majority of this water was marked as being subjected to some treatment before injection into for use in fossil fuel extraction (see above).
+
+```{r}
+q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Domestic Water System" & water_suitable == "N") %>%
+  group_by(county2, year) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  pivot_wider(names_from = county2, values_from = gallons_injected) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  datatable()
+```
+
+We then looked at the suppliers of this water in Kern County, which required some further data cleaning, as before.
+
+```{r}
+kern_domestic_not_suitable <- q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code != "WD" & water_source_text == "Domestic Water System" & water_suitable== "N" & county == "Kern") 
+  
+unique(kern_domestic_not_suitable$water_source_name)
+```
+
+All of the entries marked "Lokern - EOR Steam" were from reports made by Chevron. Enquiries to the company revealed that these entries actually referred to water from the West Kern Water District. So entries corresponding to the West Kern Water District could be consolidated.
+
+```{r}
+kern_domestic_not_suitable <- kern_domestic_not_suitable %>%
+  mutate(water_source_name2 = case_when(grepl("kern",water_source_name, ignore.case = TRUE) ~ "West Kern Water District",
+                                        TRUE ~ water_source_name)) 
+  
+kern_domestic_not_suitable %>%
+  group_by(water_source_name2) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+We then looked at the operators involved in the use of this water.
+
+```{r}
+kern_domestic_not_suitable %>%
+  group_by(water_source_name2, operator_name) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE)*42) %>%
+  mutate(percent = round(100 * gallons_injected/sum(gallons_injected),2),
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-percent) %>%
+  datatable()
+```
+
+Chevron accounted for the vast majority of the water marked as not suitable for domestic or irrigation use in its untreated state obtained from the West Kern Water District.
+
+### Company responses and concerns about data quality
+
+When approached by Inside Climate News, Sentinel disputed the figures for its use of high-quality water from the West Kern Water District. "Upon further investigation, it appears that there are inaccuracies reflected in our reports which overstate our use of fresh water. We will work expeditiously to correct this issue," a company spokesperson replied. "The 2021 number reported is inaccurate. ... [T]he correct volume of water used for steam injection in 2021 would be under 2 million barrels [84 million gallons]."
+
+Digging further into data reported by Sentinel, we found clear discrepancies between numbers reported in its quarterly reports and those in monthly reports covering the same periods. For example, some of Sentinel's quarterly reports indicated that fresh water from domestic suppliers had been disposed of by injection into wells, marked by the `well_type_code` "WD."
+
+```{r}
+sentinel_kern_domestic_suitable_wd <- q_inject %>%
+  filter(!grepl("Offshore",county) & well_type_code == "WD" & water_source_text == "Domestic Water System" & water_suitable == "Y" & county == "Kern" & grepl("Sentinel",operator_name)) %>%
+  mutate(quarter = quarter(injection_report_date))
+
+sentinel_kern_domestic_suitable_wd %>%
+  group_by(well_type_code, water_suitable, water_source_text) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable()
+```
+
+It makes little sense that high-quality water from a domestic supplier would be disposed of in this way. So we examined records for the same wells (identified by their unique `api` code) and time periods from the monthly reports.
+
+```{r}
+sentinel_kern_domestic_suitable_wd_join <- sentinel_kern_domestic_suitable_wd %>%
+  select(api,year,quarter) %>%
+  unique()
+
+m_inject %>%
+  mutate(quarter = quarter(injection_date)) %>%
+  semi_join(sentinel_kern_domestic_suitable_wd_join, by = c("api","year","quarter")) %>%
+  filter(well_type_code == "WD") %>%
+  group_by(well_type_code,water_source_text) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable()
+```
+
+The corresponding monthly reports for these wells indicated that all of the water disposed of in these wells during the same time periods was produced water from oil and gas wells. Queried about these findings, the Sentinel spokesperson stated that "we do not dispose of any fresh water into disposal wells."
+
+For other wells operated by Sentinel, for example `api` "040298991400," we found that entries from quarterly reports detailed the injection of exactly the same quantity of water from both domestic supplies and produced water from oil and gas wells.
+
+
+```{r}
+api_040298991400 <- q_inject %>%
+  filter(api == "040298991400") %>%
+  mutate(quarter = quarter(injection_report_date),
+         gallons_injected = steam_water_injected_bbl * 42,
+         gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  select(api, well_type_code, year, quarter, water_suitable, water_source_text, gallons_injected) %>%
+  arrange(-year,-quarter)
+
+datatable(api_040298991400)
+```
+
+(The code "SF" denotes steam flooding, a method of enhanced oil recovery used for fossil fuel extraction.)
+
+When we looked at the corresponding monthly reports for the same wells and time periods, the same total quantities were reported, but attributed solely to produced water from oil or gas wells.
+
+```{r}
+api_040298991400_join <- api_040298991400 %>%
+  select(api, year, quarter) %>%
+  unique()
+
+m_inject %>%
+  mutate(quarter = quarter(injection_date)) %>%
+  semi_join(api_040298991400_join, by = c("api","year","quarter")) %>%
+  group_by(api, well_type_code, year, quarter, water_source_text) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  arrange(-year,-quarter) %>%
+  datatable()
+``` 
+
+Indeed, Sentinel's monthly reports failed to document any use of water from domestic suppliers across all of its wells.
+
+```{r}
+m_inject %>%
+  filter(grepl("Sentinel",operator_name)) %>%
+  group_by(operator_name, water_source_text) %>%
+  summarize(gallons_injected = sum(steam_water_injected_bbl, na.rm = TRUE) * 42) %>%
+  arrange(-gallons_injected) %>%
+  mutate(gallons_injected = prettyNum(gallons_injected, big.mark = ",")) %>%
+  datatable()
+```
+
+
+The Sentinel spokesperson did not offer a specific explanation for the discrepancies between its quarterly and monthly reports.
+
+When we asked Chevron about its use of water from the West Kern Water District, the company admitted that substantial quantities of the water it had marked as not suitable for domestic or irrigation use prior to treatment had been mislabeled in its quarterly reports — and was in fact high-quality water that was suitable for domestic use and agriculture.
+
+“We are continuing to investigate and will take appropriate corrective action,” said Chevron spokesperson Sean Comey, who blamed software errors for the problem. He noted that the company’s use of this high-quality domestic water in Kern County had decreased, from 369 million gallons in 2018 to around 20 million gallons in 2021. Chevron discontinued the use of this high quality water for oil extraction in early 2021, Comey added.
+
+Still, adding Chevron’s corrected numbers to our analysis of the use of high-quality water from domestic suppliers more than doubled the amount of this water used for fossil fuel extraction in Kern County from 2018 to 2021, to a total of more than 1.4 billion gallons.
+
+The admission of major errors in reporting from two large companies reveals deep problems with the quality of the data collected by CalGEM that make it very difficult to establish the quantities of high-quality water used for oil extraction.
