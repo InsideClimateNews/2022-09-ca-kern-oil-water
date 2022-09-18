@@ -124,5 +124,5 @@ q_inject <- left_join(q_inject, a_wells_join, by = c("api", "year"))
 rm(a_wells, a_wells_join, wells_locations)
 
 # save Rdata
-save.image("calgem2.RData")
+save.image("calgem.RData")
 
